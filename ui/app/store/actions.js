@@ -4,6 +4,7 @@ import getBuyEthUrl from '../../../app/scripts/lib/buy-eth-url'
 import { checksumAddress } from '../helpers/utils/util'
 import { calcTokenBalance, estimateGas } from '../pages/send/send.utils'
 import ethUtil from 'ethereumjs-util'
+import { ethers } from 'ethers'
 import { fetchLocale, loadRelativeTimeFormatLocaleData } from '../helpers/utils/i18n-helper'
 import { getMethodDataAsync } from '../helpers/utils/transactions.util'
 import { fetchSymbolAndDecimals } from '../helpers/utils/token-util'
@@ -11,26 +12,33 @@ import switchDirection from '../helpers/utils/switch-direction'
 import log from 'loglevel'
 import { ENVIRONMENT_TYPE_NOTIFICATION } from '../../../app/scripts/lib/enums'
 import { hasUnconfirmedTransactions } from '../helpers/utils/confirm-tx.util'
-import { setCustomGasLimit } from '../ducks/gas/gas.duck'
+import { fetchBasicGasAndTimeEstimates, setCustomGasLimit } from '../ducks/gas/gas.duck'
 import txHelper from '../../lib/tx-helper'
 import { getEnvironmentType } from '../../../app/scripts/lib/util'
 import * as actionConstants from './actionConstants'
 import {
+  getBlockGasLimit,
+  getConversionRate,
   getPermittedAccountsForCurrentTab,
   getSelectedAccount,
   getSelectedAddress,
   getSwapAmount,
-  getSwapConversionRate,
   getSwapFromAsset,
   getSwapFromTokenAssetBalance,
   getSwapFromTokenContract,
-  getSwapPrimaryCurrency,
+  getSwapQuote,
   getSwapQuoteEstimatedGasCost,
 } from '../selectors'
 import { switchedToUnconnectedAccount } from '../ducks/alerts/unconnected-account'
 import { getUnconnectedAccountAlertEnabledness } from '../ducks/metamask/metamask'
 import { updateSwapErrors } from '../ducks/swap/swap.duck'
-import { getAmountErrorObject, getGasFeeErrorObject } from '../pages/swap/swap.utils'
+import {
+  decimalToHex,
+  estimateGasForTransaction,
+  getAmountErrorObject,
+  getGasFeeErrorObject,
+} from '../pages/swap/swap.utils'
+import { conversionUtil } from '../helpers/utils/conversion-util'
 
 let background = null
 let promisifiedBackground = null
@@ -198,84 +206,16 @@ export function verifySeedPhrase () {
   })
 }
 
-// export function getQuote (sellAmount, buyToken,sellToken) {
-//   return () => {
-//     return new Promise((resolve, reject) => {
-//       background.quote(sellAmount, buyToken, sellToken, (error, response) => {
-//         if (error) {
-//           return reject(error)
-//         }
-//         resolve(response)
-//       })
-//     })
-//   }
-// }
-
-
-// export function getQuote (sellAmount, buyToken,sellToken) {
-//   return async () => {
-//     const quote = await promisifiedBackground.quote(sellAmount, buyToken, sellToken)
-//     console.log("The quote in the account is ", quote)
-//     console.log("The background is ", await promisifiedBackground)
-//     // await forceUpdateMetamaskState(dispatch);
-//     return quote;
-//   };
-// }
-
-// export function getQuote (sellAmount, buyToken,sellToken) {
-//   log.debug('background.getQuote')
-
-//   return (dispatch) => {
-//     return new Promise((resolve, reject) => {
-//       console.log("The background script function are ", background)
-//       background.quote(sellAmount, buyToken,sellToken, (err, response) => {
-//         if (err) {
-//           dispatch(displayWarning(err.message))
-//           return reject(err)
-//         }
-//         console.log("This is the response in the getQuote ", response)
-//         await forceUpdateMetamaskState(response)
-//         resolve(response)
-//       })
-//     })
-//   }
-// }
-
 export function fetchSwapQuote (fromAsset, toAsset, amount, gasPrice) {
   return async (dispatch) => {
-    let quote = null
-
     const gasPriceDecimal = gasPrice && parseInt(gasPrice, 16).toString()
 
-    try {
-      quote = await promisifiedBackground.quote(
-        fromAsset.symbol, toAsset.symbol, parseInt(amount, 16), gasPriceDecimal,
-      )
-    } catch (error) {
-      log.error(error)
-      dispatch(displayWarning(error.message))
-      throw error
-    }
+    const quote = await promisifiedBackground.quote(
+      fromAsset.symbol, toAsset.symbol, parseInt(amount, 16), gasPriceDecimal,
+    )
 
     await dispatch(updateSwapQuote(quote))
-
-    console.log('Fetching with gas: ', gasPriceDecimal)
-  }
-}
-
-export function fillOrder (quote) {
-  log.debug('action - fillOrder')
-  return async (dispatch) => {
-    let newState
-    try {
-      newState = await promisifiedBackground.fillOrder(quote)
-    } catch (error) {
-      log.error(error)
-      dispatch(displayWarning(error.message))
-      throw error
-    }
-    // dispatch(updateSwapQuote(newState.quotes))
-    return newState
+    await dispatch(updateSwapFromTokenAllowance({ fromAsset, quote }))
   }
 }
 
@@ -286,9 +226,8 @@ export function computeSwapErrors (overrides) {
     let data = {
       amount: getSwapAmount(state) || '0',
       balance: getSelectedAccount(state)?.balance || '0',
-      conversionRate: getSwapConversionRate(state),
+      conversionRate: getConversionRate(state),
       estimatedGasCost: getSwapQuoteEstimatedGasCost(state),
-      primaryCurrency: getSwapPrimaryCurrency(state),
       tokenBalance: getSwapFromTokenAssetBalance(state),
       fromAsset: getSwapFromAsset(state),
       ...overrides,
@@ -721,6 +660,66 @@ export function signTx (txData) {
   }
 }
 
+export function approveAllowance (allowance) {
+  return async (dispatch, getState) => {
+    const state = getState()
+
+    const { address: tokenAddress, decimals } = getSwapFromAsset(state)
+    const allowanceTarget = getSwapQuote(state).allowanceTarget
+
+    const maxAllowance = ethers.BigNumber.from(2).pow(256).sub(1)
+    const decimalFactor = ethers.BigNumber.from(10).pow(decimals)
+    const computedAllowance = allowance ? ethers.BigNumber.from(allowance).mul(decimalFactor) : maxAllowance
+
+    const iERC20 = new ethers.utils.Interface(abi)
+    const data = iERC20.encodeFunctionData(
+      'approve', [allowanceTarget, computedAllowance],
+    )
+
+    const basicGasEstimates = await dispatch(fetchBasicGasAndTimeEstimates())
+    const gasPrice = ethUtil.addHexPrefix(conversionUtil(basicGasEstimates.fast, {
+      fromDenomination: 'GWEI',
+      toDenomination: 'WEI',
+      fromNumericBase: 'dec',
+      toNumericBase: 'hex',
+    }))
+
+    const transaction = {
+      from: getSelectedAddress(state),
+      to: tokenAddress,
+      value: '0x0',
+      gasPrice,
+      data,
+    }
+
+    const blockGasLimit = getBlockGasLimit(state)
+
+    let gas = decimalToHex('21000')
+    try {
+      gas = await estimateGasForTransaction({
+        transaction,
+        estimateGasMethod: promisifiedBackground.estimateGas,
+        blockGasLimit,
+      })
+
+    } catch (e) {
+      await dispatch(displayWarning(e.message))
+    }
+
+    await dispatch(createTransaction({ ...transaction, gas }))
+  }
+}
+
+export function createTransaction (transaction) {
+  return (dispatch) => {
+    global.ethQuery.sendTransaction(transaction, (err) => {
+      if (err) {
+        return dispatch(displayWarning(err.message))
+      }
+    })
+  }
+}
+
 export function setGasLimit (gasLimit) {
   return {
     type: actionConstants.UPDATE_GAS_LIMIT,
@@ -834,9 +833,9 @@ export function updateSwapFromTokenBalance ({ fromAsset }) {
       return
     }
 
-    // Step 5: Invoke balanceOf(addr) on the contract, and update the
-    // Redux state.
-    return contract.balanceOf(address)
+    // Step 5: Invoke following contract method and update the Redux store:
+    //    balanceOf(address account) → uint256
+    contract.balanceOf(address)
       .then((usersToken) => {
         if (usersToken) {
           dispatch(setSwapFromTokenAssetBalance(usersToken.balance.toString(16)))
@@ -845,6 +844,43 @@ export function updateSwapFromTokenBalance ({ fromAsset }) {
       .catch((err) => {
         log.error(err)
         updateSwapErrors({ fromTokenAssetBalance: 'tokenBalanceError' })
+      })
+  }
+}
+
+export function updateSwapFromTokenAllowance ({ fromAsset, quote }) {
+  return async (dispatch, getState) => {
+    // Step 1: unset fromTokenAssetBalance if fromAsset is unselected or set
+    // to ETH.
+    if (!fromAsset?.address) {
+      dispatch(setSwapFromTokenAssetAllowance(null))
+      return
+    }
+
+    // Step 2: Get current Redux state, to use with selectors.
+    const state = getState()
+
+    // Step 3: Get properties from the state required for querying the
+    // the contract allowance.
+    const contract = getSwapFromTokenContract(state)
+    const address = getSelectedAddress(state)
+
+    // Step 4: Do nothing if no contract object was initialized.
+    if (!contract) {
+      return
+    }
+
+    // Step 5: Invoke following contract method and update the Redux store:
+    //    allowance(address owner, address spender) → uint256
+    contract.allowance(address, quote.allowanceTarget)
+      .then((allowance) => {
+        if (allowance) {
+          dispatch(setSwapFromTokenAssetAllowance(allowance.remaining.toString(16)))
+        }
+      })
+      .catch((err) => {
+        log.error(err)
+        updateSwapErrors({ fromTokenAssetAllowance: 'tokenBalanceError' })
       })
   }
 }
@@ -870,6 +906,13 @@ export function setSwapFromTokenAssetBalance (balance) {
   }
 }
 
+export function setSwapFromTokenAssetAllowance (allowance) {
+  return {
+    type: actionConstants.UPDATE_SWAP_FROM_TOKEN_ASSET_ALLOWANCE,
+    value: allowance,
+  }
+}
+
 export function updateSendHexData (value) {
   return {
     type: actionConstants.UPDATE_SEND_HEX_DATA,
@@ -877,23 +920,9 @@ export function updateSendHexData (value) {
   }
 }
 
-export function updateSwapHexData (value) {
-  return {
-    type: actionConstants.UPDATE_SWAP_HEX_DATA,
-    value,
-  }
-}
-
 export function updateSendTo (to, nickname = '') {
   return {
     type: actionConstants.UPDATE_SEND_TO,
-    value: { to, nickname },
-  }
-}
-
-export function updateSwapTo (to, nickname = '') {
-  return {
-    type: actionConstants.UPDATE_SWAP_TO,
     value: { to, nickname },
   }
 }
@@ -997,13 +1026,6 @@ export function updateSendEnsResolution (ensResolution) {
   }
 }
 
-export function updateSwapEnsResolution (ensResolution) {
-  return {
-    type: actionConstants.UPDATE_SWAP_ENS_RESOLUTION,
-    payload: ensResolution,
-  }
-}
-
 export function updateSendEnsResolutionError (errorMessage) {
   return {
     type: actionConstants.UPDATE_SEND_ENS_RESOLUTION_ERROR,
@@ -1011,12 +1033,6 @@ export function updateSendEnsResolutionError (errorMessage) {
   }
 }
 
-export function updateSwapEnsResolutionError (errorMessage) {
-  return {
-    type: actionConstants.UPDATE_SWAP_ENS_RESOLUTION_ERROR,
-    payload: errorMessage,
-  }
-}
 
 export function signTokenTx (tokenAddress, toAddress, amount, txData) {
   return (dispatch) => {

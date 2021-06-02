@@ -1,26 +1,8 @@
 import abi from 'human-standard-token-abi'
-import { accountsWithSwapEtherInfoSelector, getAddressBook, getSelectedAccount, getTargetAccount } from '.'
-import { multiplyCurrencies } from '../helpers/utils/conversion-util'
+import { getSelectedAccount, getSelectedAddress, getTargetAccount } from '.'
+import { conversionGTE } from '../helpers/utils/conversion-util'
+import { decimalToHex } from '../pages/swap/swap.utils'
 
-export function getSwapBlockGasLimit (state) {
-  return state.metamask.currentBlockGasLimit
-}
-
-export function getSwapConversionRate (state) {
-  return state.metamask.conversionRate
-}
-
-export function getSwapNativeCurrency (state) {
-  return state.metamask.nativeCurrency
-}
-
-export function getSwapCurrentNetwork (state) {
-  return state.metamask.network
-}
-
-export function getSwapQuoteGasLimit (state) {
-  return state.metamask.swap.quote?.gas || '0'
-}
 
 export function getSwapGasPrice (state) {
   return state.metamask.swap.gasPrice
@@ -28,30 +10,6 @@ export function getSwapGasPrice (state) {
 
 export function getSwapGasLimit (state) {
   return state.metamask.swap.gasLimit
-}
-
-export function getSwapGasCost (state) {
-  const gasLimit = getSwapQuoteGas(state)
-  const gasPrice = getSwapGasPrice(state)
-
-  if (!gasLimit || !gasPrice) {
-    return
-  }
-
-  return multiplyCurrencies(gasLimit, gasPrice, {
-    toNumericBase: 'hex',
-    multiplicandBase: 10,
-    multiplierBase: 16,
-  })
-}
-
-export function getSwapPrimaryCurrency (state) {
-  const swapFromAsset = getSwapFromAsset(state)
-  return swapFromAsset?.symbol
-}
-
-export function getSwapToken (state) {
-  return state.metamask.swap.token
 }
 
 export function getSwapFromAsset (state) {
@@ -69,19 +27,6 @@ export function getSwapAmount (state) {
 export function getSwapQuote (state) {
   return state.metamask.swap.quote
 }
-
-export function getSwapQuoteData (state) {
-  return state.metamask.swap.quote?.data
-}
-
-export function getSwapQuoteTo (state) {
-  return state.metamask.swap.quote?.to
-}
-
-export function getSwapQuoteValue (state) {
-  return state.metamask.swap.quote?.value
-}
-
 
 export function getSwapQuoteGasPrice (state) {
   return state.metamask.swap.quote?.gasPrice
@@ -105,37 +50,15 @@ export function getSwapQuoteEstimatedGasCost (state) {
 
 
 export function getSwapFromTokenContract (state) {
-  const swapFromTokenAddress = getSwapFromTokenAddress(state)
+  const swapFromTokenAddress = getSwapFromAsset(state)?.address
+
   return swapFromTokenAddress
     ? global.eth.contract(abi).at(swapFromTokenAddress)
     : null
 }
 
-export function getSwapToTokenContract (state) {
-  const swapToTokenAddress = getSwapToTokenAddress(state)
-  return swapToTokenAddress
-    ? global.eth.contract(abi).at(swapToTokenAddress)
-    : null
-}
-
-export function getSwapHexData (state) {
-  return state.metamask.swap.data
-}
-
-export function getSwapHexDataFeatureFlagState (state) {
-  return state.metamask.featureFlags.swapHexData
-}
-
-export function getSwapEditingTransactionId (state) {
-  return state.metamask.swap.editingTransactionId
-}
-
 export function getSwapErrors (state) {
   return state.swap.errors
-}
-
-export function swapAmountIsInError (state) {
-  return Boolean(state.swap.errors.amount)
 }
 
 export function getSwapFrom (state) {
@@ -146,10 +69,8 @@ export function getSwapFromTokenAssetBalance (state) {
   return state.metamask.swap.fromTokenAssetBalance
 }
 
-// TODO: remove this
-export function getSwapFromBalance (state) {
-  const fromAccount = getSwapFromObject(state)
-  return fromAccount.balance
+export function getSwapFromTokenAssetAllowance (state) {
+  return state.metamask.swap.fromTokenAssetAllowance
 }
 
 export function getSwapFromObject (state) {
@@ -159,22 +80,12 @@ export function getSwapFromObject (state) {
     : getSelectedAccount(state)
 }
 
-export function getSwapMaxModeState (state) {
-  return state.metamask.swap.maxModeOn
-}
-
 export function getSwapTo (state) {
   return state.metamask.swap.to
 }
 
 export function getSwapToNickname (state) {
   return state.metamask.swap.toNickname
-}
-
-export function getSwapToAccounts (state) {
-  const fromAccounts = accountsWithSwapEtherInfoSelector(state)
-  const addressBookAccounts = getAddressBook(state)
-  return [...fromAccounts, ...addressBookAccounts]
 }
 
 export function getSwapTokenBalance (state) {
@@ -222,33 +133,40 @@ export function isSwapFormInError (state) {
   return Object.values(getSwapErrors(state)).some((n) => n)
 }
 
-export function getSwapTokenAddress (state) {
-  return getSwapToken(state)?.address
-}
-
-export function getSwapFromTokenAddress (state) {
-  return getSwapFromAsset(state)?.address
-}
-
-export function getSwapFromAssetSymbol (state) {
-  return getSwapFromAsset(state)?.symbol
-}
-
-export function getSwapToTokenAddress (state) {
-  return getSwapToAsset(state)?.address
-}
-
-export function getSwapToAssetSymbol (state) {
-  return getSwapToAsset(state)?.symbol
-}
-
-export function getSwapIsContractAddress (state) {
-  const swapTo = getSwapTo(state)
-  const swapFromTokenAddress = getSwapFromTokenAddress(state)
-
-  if (!swapFromTokenAddress) {
-    return false
+export function getSwapTransactionObject (state) {
+  const quote = getSwapQuote(state)
+  if (!quote) {
+    return
   }
 
-  return swapTo.toLowerCase() === swapFromTokenAddress.toLowerCase()
+  return {
+    from: getSelectedAddress(state),
+    to: quote.to,
+    value: decimalToHex(quote.value),
+    gas: decimalToHex(quote.gas),
+    gasPrice: decimalToHex(quote.gasPrice),
+    data: quote.data,
+  }
+}
+
+export function isSwapFromTokenAssetAllowanceEnough (state) {
+  const amount = getSwapAmount(state)
+  const fromTokenAssetAllowance = getSwapFromTokenAssetAllowance(state)
+
+  if (!amount || !fromTokenAssetAllowance) {
+    return true
+  }
+
+  const hasSufficientAllowance = conversionGTE(
+    {
+      value: fromTokenAssetAllowance,
+      fromNumericBase: 'hex',
+    },
+    {
+      value: amount,
+      fromNumericBase: 'hex',
+    },
+  )
+
+  return fromTokenAssetAllowance !== '0' && hasSufficientAllowance
 }

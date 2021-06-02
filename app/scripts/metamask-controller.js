@@ -40,7 +40,7 @@
  import PersonalMessageManager from './lib/personal-message-manager'
  import TypedMessageManager from './lib/typed-message-manager'
  import TransactionController from './controllers/transactions'
- import SwapsController from './controllers/swaps'
+ import SwapsController from './controllers/swap'
  import TokenRatesController from './controllers/token-rates'
  import DetectTokensController from './controllers/detect-tokens'
  import { PermissionsController } from './controllers/permissions'
@@ -420,11 +420,7 @@
        getNextNonce: nodeify(this.getNextNonce, this),
  
        // swapsController
-       wrapETH: nodeify(swapsController.wrapETH, swapsController),
-       // quote: nodeify(swapsController.quote, swapsController),
        quote: nodeify(this.quote, this),
-       approveTokenAllowance: nodeify(swapsController.approveTokenAllowance, swapsController),
-       fillOrder: nodeify(this.fillOrder, this),
  
        // messageManager
        signMessage: nodeify(this.signMessage, this),
